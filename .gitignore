@@ -1,0 +1,19 @@
+# CMake and build artifacts
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+Makefile
+*.cmake
+build/
+bin/
+
+# IDE artifacts
+.idea/
+*.iml
+
+# OS generated files
+.DS_Store
+
+# Executables
+*.exe
+*.o
