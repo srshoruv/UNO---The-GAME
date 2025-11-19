@@ -1,4 +1,3 @@
-// A simplified version of UNO with animations and a turn-based feel.
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
@@ -16,26 +15,21 @@ using namespace std;
 
 enum CardColor { RED, GREEN, BLUE, YELLOW, NONE };
 enum CardType { NUMBER, SKIP, REVERSE, DRAW_TWO, WILD, WILD_DRAW_FOUR };
-enum GameState { PLAYER_TURN, AI_TURN, AI_THINKING, WILD_COLOR_SELECT, ANIMATING_PLAYER_PLAY, ANIMATING_PLAYER_DRAW, ANIMATING_AI_PLAY, ANIMATING_AI_DRAW };
+enum GameState { PLAYER_TURN, AI_TURN, AI_THINKING, WILD_COLOR_SELECT, ANIMATING_PLAYER_PLAY, ANIMATING_PLAYER_DRAW, ANIMATING_AI_PLAY, ANIMATING_AI_DRAW, GAME_OVER_PLAYER_WON, GAME_OVER_AI_WON };
 
 class Card {
     public:
     CardColor color;
     CardType type;
-    int number; // for NUMBER: 0-9; for action: -1
-    float x, y; // center in NDC
+    int number;
+    float x, y;
 
     bool isAnimating = false;
-    double animStartTime = 0.0;
-    double animDuration = 0.5; // Animation duration in seconds
+    double animDuration = 0.5;
+    double currentAnimTime = 0.0;
 
     float startX = 0.0f, startY = 0.0f;
     float targetX = 0.0f, targetY = 0.0f;
-
-    // New animation parameters for rotation
-    float startRotation = 0.0f;
-    float targetRotation = 0.0f;
-    float rotation = 0.0f; // Current rotation
 };
 
 float cardW = 0.15f, cardH = 0.22f;
@@ -48,9 +42,13 @@ GameState gameState = PLAYER_TURN;
 CardColor wildSelectedColor = NONE;
 double aiThinkingStartTime;
 
-// --- Image & Texture management ---
+bool canSelectWildColor = false;
+
 map<string, GLuint> textures;
 GLuint backgroundTextureID;
+GLuint playerAvatarID;
+GLuint aiAvatarID;
+GLuint crownTextureID;
 
 GLuint loadTexture(const char* path) {
     GLuint textureID;
@@ -78,9 +76,8 @@ GLuint loadTexture(const char* path) {
     return textureID;
 }
 
-// ---- OpenGL rectangles for cards, UI, and background ----
+
 float cardVerts[] = {
-    // position      // texCoords
     -0.5f, -0.7f,    0.0f, 0.0f,
      0.5f, -0.7f,    1.0f, 0.0f,
      0.5f,  0.7f,    1.0f, 1.0f,
@@ -98,7 +95,6 @@ float ui_verts[] = {
 };
 
 float backgroundVertices[] = {
-    // pos      // tex
     -1.0f,  1.0f,  0.0f, 1.0f,
     -1.0f, -1.0f,  0.0f, 0.0f,
      1.0f, -1.0f,  1.0f, 0.0f,
@@ -106,7 +102,7 @@ float backgroundVertices[] = {
 };
 unsigned int backgroundIndices[] = {0, 1, 2, 2, 3, 0};
 
-// ---- Shaders ----
+
 const char* vtxSrc = R"(
 #version 330 core
 layout(location = 0) in vec2 aPos;
@@ -140,9 +136,8 @@ void main() {
 
     vec4 finalColor = texColor;
 
-    // Apply color tinting to non-wild cards and to wild cards that have a selected color
     if (hasTexture > 0) {
-        if (texColor.r > 0.9 && texColor.g > 0.9 && texColor.b > 0.9) { // Check for white areas
+        if (texColor.r > 0.9 && texColor.g > 0.9 && texColor.b > 0.9) {
             finalColor = baseColor;
         }
     }
@@ -190,12 +185,11 @@ GLuint createShader(const char* vertexSource, const char* fragmentSource) {
     return program;
 }
 
-// Forward declaration
+
 void nextTurn();
 void layoutHand();
 void layoutAIHand();
 
-// ---- Card layout and utility ----
 
 void colorToRGB(CardColor c, float& r, float& g, float& b) {
     switch(c) {
@@ -288,7 +282,7 @@ void layoutHand() {
 
     for (size_t i = 0; i < playerHand.size(); ++i) {
         playerHand[i].x = startX + i * spacing;
-        playerHand[i].y = -0.6f;
+        playerHand[i].y = -0.7f;
     }
 }
 
@@ -301,7 +295,7 @@ void layoutAIHand() {
 
     for (size_t i = 0; i < aiHand.size(); ++i) {
         aiHand[i].x = startX + i * spacing;
-        aiHand[i].y = 0.6f;
+        aiHand[i].y = 0.7f;
     }
 }
 bool canPlay(const Card& card, const Card& top) {
@@ -321,7 +315,7 @@ void nextTurn() {
     }
 }
 
-// handle non-wild card effects
+
 void applyCardEffect(const Card& playedCard) {
     if (playedCard.type == DRAW_TWO) {
         if (gameState == ANIMATING_PLAYER_PLAY) {
@@ -347,11 +341,12 @@ void applyCardEffect(const Card& playedCard) {
         nextTurn();
     }
 
-    // Check for game end
-    if (playerHand.empty() || aiHand.empty()) {
-        glfwSetWindowShouldClose(glfwGetCurrentContext(), true);
-        if (playerHand.empty()) cout << "Player Won!\n";
-        else if (aiHand.empty()) cout << "AI Won!\n";
+    if (playerHand.empty()) {
+        gameState = GAME_OVER_PLAYER_WON;
+        cout << "Player Won!\n";
+    } else if (aiHand.empty()) {
+        gameState = GAME_OVER_AI_WON;
+        cout << "AI Won!\n";
     }
     layoutPiles();
 }
@@ -361,22 +356,21 @@ void startCardAnimation(Card& card, float targetX, float targetY) {
     card.targetX = targetX;
     card.targetY = targetY;
     card.isAnimating = true;
-    card.animStartTime = glfwGetTime();
+    card.currentAnimTime = 0.0;
 }
 
-void updateAnimations() {
-    double currentTime = glfwGetTime();
-
-    // Animate a card from player's hand to discard pile
+void updateAnimations(float deltaTime) {
     if (gameState == ANIMATING_PLAYER_PLAY) {
         Card& card = discardPile.back();
-        double elapsedTime = currentTime - card.animStartTime;
-        float progress = min(1.0f, (float)(elapsedTime / card.animDuration));
+        card.currentAnimTime += deltaTime;
+        float progress = min(1.0f, (float)(card.currentAnimTime / card.animDuration));
 
         card.x = card.startX + (card.targetX - card.startX) * progress;
         card.y = card.startY + (card.targetY - card.startY) * progress;
 
         if (progress >= 1.0f) {
+            card.x = card.targetX;
+            card.y = card.targetY;
             card.isAnimating = false;
 
             if (card.type == WILD || card.type == WILD_DRAW_FOUR) {
@@ -390,6 +384,8 @@ void updateAnimations() {
                 }
                 gameState = WILD_COLOR_SELECT;
                 discardPile.back().color = NONE;
+
+                canSelectWildColor = true;
             } else {
                 applyCardEffect(card);
             }
@@ -398,16 +394,17 @@ void updateAnimations() {
         }
     }
 
-    // Animate a card from draw pile to player's hand
     if (gameState == ANIMATING_PLAYER_DRAW) {
         Card& card = playerHand.back();
-        double elapsedTime = currentTime - card.animStartTime;
-        float progress = min(1.0f, (float)(elapsedTime / card.animDuration));
+        card.currentAnimTime += deltaTime;
+        float progress = min(1.0f, (float)(card.currentAnimTime / card.animDuration));
 
         card.x = card.startX + (card.targetX - card.startX) * progress;
         card.y = card.startY + (card.targetY - card.startY) * progress;
 
         if (progress >= 1.0f) {
+            card.x = card.targetX;
+            card.y = card.targetY;
             card.isAnimating = false;
             nextTurn();
             layoutHand();
@@ -415,16 +412,17 @@ void updateAnimations() {
         }
     }
 
-    // Animate AI playing a card
     if (gameState == ANIMATING_AI_PLAY) {
         Card& card = discardPile.back();
-        double elapsedTime = currentTime - card.animStartTime;
-        float progress = min(1.0f, (float)(elapsedTime / card.animDuration));
+        card.currentAnimTime += deltaTime;
+        float progress = min(1.0f, (float)(card.currentAnimTime / card.animDuration));
 
         card.x = card.startX + (card.targetX - card.startX) * progress;
         card.y = card.startY + (card.targetY - card.startY) * progress;
 
         if (progress >= 1.0f) {
+            card.x = card.targetX;
+            card.y = card.targetY;
             card.isAnimating = false;
 
             if (card.type == WILD_DRAW_FOUR) {
@@ -446,16 +444,17 @@ void updateAnimations() {
         }
     }
 
-    // Animate AI drawing a card
     if (gameState == ANIMATING_AI_DRAW) {
         Card& card = aiHand.back();
-        double elapsedTime = currentTime - card.animStartTime;
-        float progress = min(1.0f, (float)(elapsedTime / card.animDuration));
+        card.currentAnimTime += deltaTime;
+        float progress = min(1.0f, (float)(card.currentAnimTime / card.animDuration));
 
         card.x = card.startX + (card.targetX - card.startX) * progress;
         card.y = card.startY + (card.targetY - card.startY) * progress;
 
         if (progress >= 1.0f) {
+            card.x = card.targetX;
+            card.y = card.targetY;
             card.isAnimating = false;
             nextTurn();
             layoutAIHand();
@@ -465,7 +464,6 @@ void updateAnimations() {
 }
 
 
-// ---- AI Logic ----
 void aiTurn() {
     Card& top = discardPile.back();
     int playIndex = -1;
@@ -479,7 +477,6 @@ void aiTurn() {
     if (playIndex != -1) {
         Card playedCard = aiHand[playIndex];
 
-        // Set the card's position to its current location in the hand before pushing it to the pile
         playedCard.x = aiHand[playIndex].x;
         playedCard.y = aiHand[playIndex].y;
 
@@ -527,7 +524,12 @@ void aiTurn() {
 }
 
 void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
-    if (gameState != PLAYER_TURN && gameState != WILD_COLOR_SELECT) return;
+    if (gameState != PLAYER_TURN &&
+        (gameState != ANIMATING_PLAYER_PLAY ||
+         (discardPile.empty() || (discardPile.back().type != WILD && discardPile.back().type != WILD_DRAW_FOUR))) &&
+        gameState != WILD_COLOR_SELECT) {
+        return;
+    }
 
     double mx, my;
     glfwGetCursorPos(window, &mx, &my);
@@ -540,7 +542,6 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
         if (gameState == PLAYER_TURN) {
             Card& top = discardPile.back();
 
-            // Check if player clicked on the draw pile
             if (!drawPile.empty()) {
                 Card& pileCard = drawPile.back();
                 if (abs(x - pileCard.x) < cardW * 0.5f && abs(y - pileCard.y) < cardH * 0.5f) {
@@ -558,14 +559,12 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
                 }
             }
 
-            // Check if player clicked on a card in their hand
-            for (size_t i = 0; i < playerHand.size(); ++i) {
+            for (size_t i = playerHand.size(); i-- > 0; ) {
                 Card& card = playerHand[i];
                 if (abs(x - card.x) < cardW * 0.5f && abs(y - card.y) < cardH * 0.5f) {
                     if (canPlay(card, top)) {
                         Card playedCard = card;
 
-                        // Set the card's position to its current location in the hand before pushing it to the pile
                         playedCard.x = card.x;
                         playedCard.y = card.y;
 
@@ -579,9 +578,13 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
                     }
                 }
             }
-        } else if (gameState == WILD_COLOR_SELECT) {
-            // Player is selecting a color for a wild card
-            if (y > 0.0f && y < 0.2f) {
+        }
+
+        if ((gameState == WILD_COLOR_SELECT ||
+            (gameState == ANIMATING_PLAYER_PLAY && !discardPile.empty() &&
+             (discardPile.back().type == WILD || discardPile.back().type == WILD_DRAW_FOUR))) && canSelectWildColor) {
+
+            if (y > 0.1f && y < 0.3f) {
                 CardColor selectedColor = NONE;
                 if (x > -0.6f && x < -0.4f) {
                     selectedColor = RED;
@@ -596,15 +599,14 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
                     discardPile.back().color = selectedColor;
                     nextTurn();
                     layoutPiles();
+                    canSelectWildColor = false;
                 }
             }
         }
     }
 }
 
-// ------------------------------------------
-// --- Main Function ---
-// ------------------------------------------
+
 int main() {
     if (!glfwInit()) return -1;
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -622,10 +624,8 @@ int main() {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     GLuint shaderProg = createShader(vtxSrc, fragSrc);
-
     GLuint uiShader = createShader(uiVertexShaderSource, uiFragmentShaderSource);
 
-    // Load all textures based on the new directory structure and file names
     for (int c = 0; c < 4; ++c) {
         string colorStr = cardColorToString((CardColor)c);
         for (int n = 0; n <= 9; ++n) {
@@ -644,7 +644,9 @@ int main() {
     textures["textures/card_back/back.png"] = loadTexture("textures/card_back/back.png");
 
     backgroundTextureID = loadTexture("textures/background.png");
-
+    playerAvatarID = loadTexture("textures/player_avatar.png");
+    aiAvatarID = loadTexture("textures/ai_avatar.png");
+    crownTextureID = loadTexture("textures/crown.png");
 
     GLuint VAO, VBO, EBO;
     glGenVertexArrays(1, &VAO);
@@ -715,16 +717,24 @@ int main() {
     layoutAIHand();
     layoutPiles();
 
+    float deltaTime = 0.0f;
+    float lastFrame = 0.0f;
+
     while (!glfwWindowShouldClose(window)) {
+        float currentFrame = glfwGetTime();
+        deltaTime = currentFrame - lastFrame;
+        lastFrame = currentFrame;
+
         glfwPollEvents();
         glClearColor(0.1f, 0.1f, 0.2f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
-        updateAnimations();
-
-        if (gameState == AI_THINKING) {
-            if (glfwGetTime() - aiThinkingStartTime > 1.0) {
-                aiTurn();
+        if (gameState != GAME_OVER_PLAYER_WON && gameState != GAME_OVER_AI_WON) {
+            updateAnimations(deltaTime);
+            if (gameState == AI_THINKING) {
+                if (glfwGetTime() - aiThinkingStartTime > 1.0) {
+                    aiTurn();
+                }
             }
         }
 
@@ -737,6 +747,42 @@ int main() {
         glUniform1f(highlightLoc, 0.0f);
         glUniform1i(hasTextureLoc, 1);
         glUniform1i(isWildLoc, 0);
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+
+        float avatarSize = 0.15f;
+        float indicatorSize = 0.22f;
+
+        if (gameState == PLAYER_TURN || gameState == ANIMATING_PLAYER_PLAY || gameState == WILD_COLOR_SELECT) {
+            glUseProgram(uiShader);
+            glBindVertexArray(uiVAO);
+            glUniform2f(uiPosLoc, 0.0f - indicatorSize * 0.5f, -0.35f - indicatorSize * 0.5f);
+            glUniform2f(uiSizeLoc, indicatorSize, indicatorSize);
+            glUniform3f(uiColorLoc, 1.0f, 1.0f, 0.0f);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+        }
+
+        if (gameState == AI_TURN || gameState == AI_THINKING || gameState == ANIMATING_AI_PLAY) {
+            glUseProgram(uiShader);
+            glBindVertexArray(uiVAO);
+            glUniform2f(uiPosLoc, 0.0f - indicatorSize * 0.5f, 0.35f - indicatorSize * 0.5f);
+            glUniform2f(uiSizeLoc, indicatorSize, indicatorSize);
+            glUniform3f(uiColorLoc, 1.0f, 1.0f, 0.0f);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+        }
+
+        glUseProgram(shaderProg);
+        glBindVertexArray(VAO);
+
+        glBindTexture(GL_TEXTURE_2D, playerAvatarID);
+        glUniform2f(offsetLoc, 0.0f, -0.35f);
+        glUniform2f(scaleLoc, avatarSize, avatarSize);
+        glUniform1f(highlightLoc, 0.0f);
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+
+        glBindTexture(GL_TEXTURE_2D, aiAvatarID);
+        glUniform2f(offsetLoc, 0.0f, 0.35f);
+        glUniform2f(scaleLoc, avatarSize, avatarSize);
+        glUniform1f(highlightLoc, 0.0f);
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
 
         glUseProgram(shaderProg);
@@ -813,6 +859,24 @@ int main() {
             glUniform2f(uiSizeLoc, uiW, uiH);
             glUniform3f(uiColorLoc, 1.0f, 1.0f, 0.2f);
             glDrawArrays(GL_TRIANGLES, 0, 6);
+        }
+
+        glUseProgram(shaderProg);
+        glBindVertexArray(VAO);
+        float crownSize = 0.1f;
+        glUniform1f(highlightLoc, 0.0f);
+        glUniform1i(hasTextureLoc, 1);
+        glUniform1i(isWildLoc, 0);
+        glUniform3f(colorLoc, 1.0f, 1.0f, 1.0f);
+        glBindTexture(GL_TEXTURE_2D, crownTextureID);
+        if (gameState == GAME_OVER_PLAYER_WON) {
+            glUniform2f(offsetLoc, 0.0f, -0.35f + avatarSize/2 + crownSize/2);
+            glUniform2f(scaleLoc, crownSize, crownSize);
+            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+        } else if (gameState == GAME_OVER_AI_WON) {
+            glUniform2f(offsetLoc, 0.0f, 0.35f + avatarSize/2 + crownSize/2);
+            glUniform2f(scaleLoc, crownSize, crownSize);
+            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
         }
 
         glfwSwapBuffers(window);
